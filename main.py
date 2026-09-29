@@ -15,6 +15,7 @@ import pypdf
 from pypdf import PdfReader, PdfWriter
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 register_heif_opener()
 
@@ -22,6 +23,15 @@ app = FastAPI(
     title="Utility Tools API",
     description="Manual testing API for image, video, audio, PDF and data utilities.",
     version="1.0.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Disposition", "X-Result-Path"],
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -82,7 +92,12 @@ def output_file(tool_name: str, filename: str):
 def send_file(path: Path):
     if not path.exists():
         raise HTTPException(500, f"Output was not created: {path}")
-    return FileResponse(str(path), filename=path.name)
+    rel_path = str(path.relative_to(RESULT_DIR)).replace("\\", "/")
+    return FileResponse(
+        str(path),
+        filename=path.name,
+        headers={"X-Result-Path": rel_path}
+    )
 
 
 def list_results(tool_name: str):
@@ -90,7 +105,7 @@ def list_results(tool_name: str):
     return {
         "message": "Completed successfully",
         "results": [
-            str(p.relative_to(RESULT_DIR))
+            str(p.relative_to(RESULT_DIR)).replace("\\", "/")
             for p in sorted(folder.iterdir())
             if p.is_file()
         ]
@@ -539,7 +554,7 @@ async def extract_images_from_pdf_endpoint(file: UploadFile = File(...)):
         "message": "Images extracted successfully",
         "count": count,
         "results": [
-            str(p.relative_to(RESULT_DIR))
+            str(p.relative_to(RESULT_DIR)).replace("\\", "/")
             for p in sorted(folder.iterdir())
             if p.is_file()
         ]
@@ -867,6 +882,48 @@ def home():
         "message": "Utility Tools API is running",
         "docs": "/docs"
     }
+
+
+# ---------------- RESULTS ----------------
+
+@app.get("/results")
+def list_all_results():
+    result_paths = []
+    file_details = []
+    if RESULT_DIR.exists():
+        for p in sorted(RESULT_DIR.rglob("*")):
+            if p.is_file():
+                rel = str(p.relative_to(RESULT_DIR)).replace("\\", "/")
+                result_paths.append(rel)
+                stat = p.stat()
+                file_details.append({
+                    "path": rel,
+                    "filename": p.name,
+                    "size_bytes": stat.st_size,
+                    "url": f"/results/{rel}"
+                })
+    return {
+        "message": "Available results retrieved successfully",
+        "results": result_paths,
+        "files": file_details,
+        "count": len(result_paths)
+    }
+
+
+@app.get("/results/{path:path}")
+def get_result_file(path: str):
+    clean_path = path.lstrip("/\\")
+    resolved_base = RESULT_DIR.resolve()
+    target_path = (RESULT_DIR / clean_path).resolve()
+
+    # Safety validation: ensure target_path is strictly within RESULT_DIR
+    if not target_path.is_relative_to(resolved_base) or target_path == resolved_base:
+        raise HTTPException(status_code=403, detail="Access denied: Invalid path")
+
+    if not target_path.exists() or not target_path.is_file():
+        raise HTTPException(status_code=404, detail="Result file not found")
+
+    return FileResponse(str(target_path), filename=target_path.name)
 
 
 if __name__ == "__main__":
